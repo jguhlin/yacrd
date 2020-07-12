@@ -28,9 +28,17 @@ extern crate anyhow;
 #[macro_use]
 extern crate log;
 
+// JGG: Reduce memory size
+#[macro_use] 
+extern crate thincollections;
+
+// JGG: Faster hashmaps
+extern crate twox_hash;
+
 /* crate use */
 use anyhow::{Context, Result};
 use structopt::StructOpt;
+
 
 /* mod declaration*/
 mod cli;

@@ -30,9 +30,18 @@ use crate::error;
 use crate::reads2ovl;
 use crate::util;
 
+// Notes: 
+// JGG: twox hash is one of the fastest hashing algorithms out there
+// Not always the fastest, but faster than the default
+use twox_hash::XxHash64;
+use std::hash::BuildHasherDefault;
+use std::collections::HashMap;
+
+use thincollections::thin_vec::ThinVec;
+
 pub struct OnDisk {
-    reads2ovl: std::collections::HashMap<String, Vec<(u32, u32)>>,
-    reads2len: std::collections::HashMap<String, usize>,
+    reads2ovl: HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>,
+    reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>>,
     prefix: String,
     number_of_value: u64,
     buffer_size: u64,
@@ -40,9 +49,15 @@ pub struct OnDisk {
 
 impl OnDisk {
     pub fn new(prefix: String, buffer_size: u64) -> Self {
+        let mut reads2ovl: HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>> = Default::default();
+        let mut reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>> = Default::default();
+
+        reads2ovl.reserve(buffer_size as usize);
+        reads2len.reserve(buffer_size as usize);
+
         OnDisk {
-            reads2ovl: std::collections::HashMap::new(),
-            reads2len: std::collections::HashMap::new(),
+            reads2ovl: reads2ovl,
+            reads2len: reads2len,
             prefix,
             number_of_value: 0,
             buffer_size,
@@ -152,7 +167,16 @@ impl reads2ovl::Reads2Ovl for OnDisk {
     }
 
     fn add_overlap(&mut self, id: String, ovl: (u32, u32)) -> Result<()> {
-        self.reads2ovl.entry(id).or_insert_with(Vec::new).push(ovl);
+        // JGG: Rust's entry API is good, but slow...
+        // self.reads2ovl.entry(id).or_insert_with(Vec::new).push(ovl);
+        let x = match self.reads2ovl.get_mut(&id) {
+            None => { self.reads2ovl.insert(id.clone(), ThinVec::new()); 
+                      self.reads2ovl.get_mut(&id).unwrap() 
+                    },
+            Some(x) => x
+        };
+
+        x.push(ovl);
 
         self.number_of_value += 1;
 
@@ -164,7 +188,13 @@ impl reads2ovl::Reads2Ovl for OnDisk {
     }
 
     fn add_length(&mut self, id: String, length: usize) {
-        self.reads2len.entry(id).or_insert(length);
+        // self.reads2len.entry(id).or_insert(length);
+        // JGG: Again, entry API is good but slow.
+        // There's a more concise way to write this but I'm not awake enough yet...
+        match self.reads2len.get_mut(&id) {
+            None => { self.reads2len.insert(id.clone(), length); },
+            Some(_) => ()
+        };
     }
 
     fn get_reads(&self) -> std::collections::HashSet<String> {

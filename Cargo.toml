@@ -17,14 +17,16 @@ keywords = ["bioinformatics", "chimera", "long-read", "scrubbing"]
 travis-ci = { repository = "natir/yacrd", branch = "master" }
 
 [dependencies]
-bio            = "0.30"
+bio            = "0.31"
 csv            = "1"
 log 	       = "0.4"
 anyhow         = "1"
-niffler        = "2"
-thiserror      = "1"
-structopt      = "0.3"
+niffler        = "2.2.0"
+thiserror      = "1.0.20"
+structopt      = "0.3.15"
 env_logger     = "0.7"
+twox-hash      = "1.5.0"
+thincollections = "0.5.0"
  
 [dev-dependencies]
 tempfile = "3.1"
