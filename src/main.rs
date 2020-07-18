@@ -57,6 +57,9 @@ fn main() -> Result<()> {
 
     let params = cli::Command::parse();
 
+    println!("Starting...");
+    println!("{}", now.elapsed().as_secs());
+
     /* Get bad region of reads */
     let mut reads2badregion: Box<dyn stack::BadPart> =
         if Some(util::FileType::Yacrd) == util::get_file_type(&params.input) {
