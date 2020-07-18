@@ -71,6 +71,9 @@ fn main() -> Result<()> {
             Box::new(stack::FromOverlap::new(reads2ovl, params.coverage))
         };
 
+    println!("Finished reading in PAF file...");
+    println!("Writing out report...");
+
     /* Write report */
     let raw_out = Box::new(std::io::BufWriter::new(
         std::fs::File::create(&params.output).with_context(|| error::Error::CantWriteFile {
@@ -84,11 +87,15 @@ fn main() -> Result<()> {
         niffler::compression::Level::One,
     )?;
 
+    // JGG: TODO: Make multi-threaded...
     for read in reads2badregion.get_reads() {
         let (bads, len) = reads2badregion.get_bad_part(&read)?;
         editor::report(&read, *len, bads, params.not_coverage, &mut out)
             .with_context(|| anyhow!("Filename: {}", &params.output))?;
     }
+
+    println!("Report written...");
+    println!("Running scrubb...");
 
     /* Run post operation on read or overlap */
     match params.subcmd {

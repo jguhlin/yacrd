@@ -75,7 +75,7 @@ impl OnDisk {
         let mut reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>> = Default::default();
 
         reads2ovl.reserve(buffer_size as usize);
-        reads2len.reserve(buffer_size as usize);
+        reads2len.reserve(1024 * 1024 * 1024 * 8);
 
         OnDisk {
             reads2ovl,
@@ -163,6 +163,8 @@ impl reads2ovl::Reads2Ovl for OnDisk {
         Ok(())
     }
 
+    // JGG: This pull the overlap from the file, so the fact we basically
+    // create a new reads2ovl instance for each thread seems to be ok...
     fn overlap(&self, id: &str) -> Result<Vec<(u32, u32)>> {
         let filename = format!("{}{}.yovl", self.prefix, id);
         if std::path::Path::new(&filename).exists() {
@@ -249,7 +251,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                         if let ThreadCommand::Terminate = command {
                             // Flush out anything still in memory...
                             r2o.clean_buffer().expect("Unable to clean buffer");
-                            return;
+                            return r2o.reads2len;
                         }
 
                         let records = command.unwrap();
@@ -314,9 +316,17 @@ impl reads2ovl::Reads2Ovl for OnDisk {
             }
         }
 
+        // JGG: Because of the multiple threads, need
+        // to bring everything back into the main impl
+        // TODO: Make more functional
         for child in children {
             match child.join() {
-                Ok(_) => (),
+                Ok(mut x) => {
+                    // HashMap<String, usize, BuildHasherDefault<XxHash64>>
+                    for (k, v) in x.drain() {
+                        self.reads2len.insert(k, v);
+                    }
+                },
                 Err(x) => panic!("Error joining worker thread... {:#?}", x)
             }
         }
