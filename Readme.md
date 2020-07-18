@@ -1,3 +1,14 @@
+# JGG
+This is a faster version of yacrd with modifications by Joseph Guhlin
+Experimental - Do not use - blah blah blah blah
+
+I've got a ~10Gb compressed PAF file to process for a very large genome
+
+On 100k PAF matches -> 90 minutes (vanilla yacrd)
+TwoxHash -> 85 minutes
+Multi-threaded PAF reader -> 70 minutes (slower hardware too, had to change servers)
+
+
 # Yet Another Chimeric Read Detector for long reads
 
 Using all-against-all read mapping, yacrd performs:

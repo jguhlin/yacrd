@@ -38,6 +38,8 @@ extern crate snap;
 extern crate fs3;
 extern crate crossbeam;
 
+use std::time::{Duration, Instant};
+
 /* mod declaration*/
 mod cli;
 mod editor;
@@ -46,8 +48,12 @@ mod reads2ovl;
 mod stack;
 mod util;
 
+use cli::SubCommand as cmd;
+
 fn main() -> Result<()> {
     env_logger::init();
+
+    let now = Instant::now();
 
     let params = cli::Command::parse();
 
@@ -68,9 +74,14 @@ fn main() -> Result<()> {
 
             reads2ovl.init(&params.input)?;
 
+            println!("Finished reading in PAF file, converting to stack::FromOverlap");
+            println!("{}", now.elapsed().as_secs());
+
+            // JGG: TODO: Make multi-threaded
             Box::new(stack::FromOverlap::new(reads2ovl, params.coverage))
         };
 
+    println!("{}", now.elapsed().as_secs());
     println!("Finished reading in PAF file...");
     println!("Writing out report...");
 
@@ -95,29 +106,30 @@ fn main() -> Result<()> {
     }
 
     println!("Report written...");
+    println!("{}", now.elapsed().as_secs());
     println!("Running scrubb...");
 
     /* Run post operation on read or overlap */
     match params.subcmd {
-        Some(cli::SubCommand::Scrubb(s)) => editor::scrubbing(
+        Some(cmd::Scrubb(s)) => editor::scrubbing(
             &s.input,
             &s.output,
             &mut *reads2badregion,
             params.not_coverage,
         )?,
-        Some(cli::SubCommand::Filter(f)) => editor::filter(
+        Some(cmd::Filter(f)) => editor::filter(
             &f.input,
             &f.output,
             &mut *reads2badregion,
             params.not_coverage,
         )?,
-        Some(cli::SubCommand::Extract(e)) => editor::extract(
+        Some(cmd::Extract(e)) => editor::extract(
             &e.input,
             &e.output,
             &mut *reads2badregion,
             params.not_coverage,
         )?,
-        Some(cli::SubCommand::Split(s)) => editor::split(
+        Some(cmd::Split(s)) => editor::split(
             &s.input,
             &s.output,
             &mut *reads2badregion,
@@ -125,6 +137,8 @@ fn main() -> Result<()> {
         )?,
         None => (),
     };
+
+    println!("{}", now.elapsed().as_secs());
 
     if let Some(prefix) = params.ondisk {
         for read in reads2badregion.get_reads() {
