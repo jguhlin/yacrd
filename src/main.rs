@@ -89,7 +89,8 @@ fn main() -> Result<()> {
     println!("Writing out report...");
 
     /* Write report */
-    let raw_out = Box::new(std::io::BufWriter::new(
+    let raw_out = Box::new(std::io::BufWriter::with_capacity(
+        8 * 1024 * 1024, // 8 Mb buffer
         std::fs::File::create(&params.output).with_context(|| error::Error::CantWriteFile {
             filename: params.output.clone(),
         })?,

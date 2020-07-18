@@ -75,7 +75,7 @@ impl OnDisk {
         let mut reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>> = Default::default();
 
         reads2ovl.reserve(buffer_size as usize);
-        reads2len.reserve(1024 * 1024 * 1024 * 8);
+        reads2len.reserve(1024 * 1024 * 8);
 
         OnDisk {
             reads2ovl,
@@ -86,6 +86,7 @@ impl OnDisk {
         }
     }
 
+    // JGG: TODO: Enable snappy compression for temp files...
     fn clean_buffer(&mut self) -> Result<()> {
         info!(
             "Clear cache, number of value in cache is {}",
@@ -94,7 +95,7 @@ impl OnDisk {
 
         for (key, values) in self.reads2ovl.iter_mut() {
             let prefix = self.prefix.clone();
-            let mut output = std::io::BufWriter::new(OnDisk::create_yacrd_ovl_file(&prefix, key));
+            let mut output = std::io::BufWriter::with_capacity(1 * 1024 * 1024, OnDisk::create_yacrd_ovl_file(&prefix, key));
 
             for v in values.iter() {
                 writeln!(output, "{},{}", v.0, v.1).with_context(|| {
@@ -171,7 +172,8 @@ impl reads2ovl::Reads2Ovl for OnDisk {
             let mut reader = csv::ReaderBuilder::new()
                 .delimiter(b',')
                 .has_headers(false)
-                .from_reader(std::io::BufReader::new(
+                .from_reader(std::io::BufReader::with_capacity(
+                    1 * 1024 * 1024, // Files are usually small, so read them completely into memory
                     std::fs::File::open(&filename).with_context(|| error::Error::CantReadFile {
                         filename: filename.clone(),
                     })?,
@@ -235,10 +237,11 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         let mut children = Vec::new();
 
-        let channel = Arc::new(ArrayQueue::new(2048));
+        let channel = Arc::new(ArrayQueue::new(1024));
 
-        // JGG: TODO: Hardcoded 32 threads
-        for _ in 0..32 {
+        // JGG: TODO: Hardcoded 48 threads
+        let threads = 48;
+        for _ in 0..threads {
             let channel = Arc::clone(&channel);
             // Need to make more of these
             // TODO: Maybe make individual functions or move this out of the
@@ -288,26 +291,31 @@ impl reads2ovl::Reads2Ovl for OnDisk {
             children.push(child);
         }
 
-        let mut chunk = Vec::with_capacity(8192);
+        let chunk_size = 8192;
+        let mut chunk = Vec::with_capacity(chunk_size);
         let backoff = Backoff::new();
         for record in reader.records() {
             let record = record.with_context(|| error::Error::ReadingErrorNoFilename {
                 format: util::FileType::Paf,
-            }).expect("Unable to read file");
+            }).expect("Unable to read file properly...");
             chunk.push(record);
-            if chunk.len() == 8192 {
+            if chunk.len() == chunk_size {
                 let mut result = channel.push(ThreadCommand::Work(chunk));
                 while let Err(PushError(chunk)) = result {
+                    println!("Buffer full, waiting...");
+                    backoff.spin();
                     result = channel.push(chunk);
                 }
-                chunk = Vec::with_capacity(8192);
+                chunk = Vec::with_capacity(chunk_size);
             }
         }
 
-        backoff.spin();
-        backoff.spin();
-        backoff.spin();
-        backoff.spin(); // Very slight delay then issue terminate commands...
+        println!("File read...");
+
+        backoff.reset();
+        for _ in 0..4 { // Very slight delay then issue terminate commands...
+            backoff.spin();
+        }
 
         for _ in 0..children.len() {
             let mut result = channel.push(ThreadCommand::Terminate);
