@@ -20,9 +20,23 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
  */
 
+// JGG: TODO: Benchmark Mimalloc vs. Jemalloc
+// Note: Mimalloc is usually faster for me, but has issues compiling on Windows
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
+/* Jemalloc is usually faster than rust default */
+// extern crate jemallocator;
+// #[global_allocator]
+// static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
+
 /* crate use */
 use anyhow::{anyhow, Context, Result};
 use clap::Clap;
+extern crate snap;
+extern crate fs3;
+extern crate crossbeam;
 
 /* mod declaration*/
 mod cli;
