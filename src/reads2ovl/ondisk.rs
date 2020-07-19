@@ -326,6 +326,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             let id_b = result[5].to_string();
 
                             // JGG: TODO: Just get length from the file directly, instead of using hashmap at all to keep track of it...
+                            // Probably use sled as high performance backend...
                 
                             let len_a = util::str2usize(&result[1]).unwrap();
                             let len_b = util::str2usize(&result[6]).unwrap();
