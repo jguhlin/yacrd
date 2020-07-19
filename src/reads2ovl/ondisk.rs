@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use crossbeam::queue::{ArrayQueue, PushError};
 use std::thread;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use thincollections::thin_vec::ThinVec;
 
