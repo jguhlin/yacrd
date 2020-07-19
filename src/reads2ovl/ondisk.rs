@@ -329,7 +329,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             if r2o.add_length(id_a.clone(), len_a) {
                                 let mut result = reads2len_channel.push(ThreadCommand::Work((id_a.clone(), len_a)));
                                 while let Err(PushError(chunk)) = result {
-                                    println!("Buffer full, waiting...");
+                                    println!("Length Buffer full, waiting...");
                                     result = reads2len_channel.push(chunk);
                                 }
                             }
@@ -337,7 +337,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             if r2o.add_length(id_b.clone(), len_b) {
                                 let mut result = reads2len_channel.push(ThreadCommand::Work((id_b.clone(), len_b)));
                                 while let Err(PushError(chunk)) = result {
-                                    println!("Buffer full, waiting...");
+                                    println!("Length Buffer full, waiting...");
                                     result = reads2len_channel.push(chunk);
                                 }
                             }
@@ -354,7 +354,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
             children.push(child);
         }
 
-        let chunk_size = 8192;
+        let chunk_size = 4096;
         let mut chunk = Vec::with_capacity(chunk_size);
         let backoff = Backoff::new();
         for record in reader.records() {
@@ -365,7 +365,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
             if chunk.len() == chunk_size {
                 let mut result = channel.push(ThreadCommand::Work(chunk));
                 while let Err(PushError(chunk)) = result {
-                    println!("Buffer full, waiting...");
+                    println!("Chunks Buffer full, waiting...");
                     backoff.spin();
                     result = channel.push(chunk);
                 }
