@@ -106,8 +106,9 @@ impl reads2ovl::Reads2Ovl for FullMemory {
         Ok(())
     }
 
-    fn add_length(&mut self, id: String, length: usize) {
+    fn add_length(&mut self, id: String, length: usize) -> bool {
         self.reads2ovl.entry(id).or_insert((Vec::new(), 0)).1 = length;
+        false // Doesn't matter for full memory...
     }
 
     fn get_reads(&self) -> std::collections::HashSet<String> {

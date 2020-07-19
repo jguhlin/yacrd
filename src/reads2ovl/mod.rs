@@ -119,7 +119,7 @@ pub trait Reads2Ovl {
     fn init_paf(&mut self, input: Box<dyn std::io::Read>) -> Result<()>;
 
     fn add_overlap(&mut self, id: String, ovl: (u32, u32)) -> Result<()>;
-    fn add_length(&mut self, id: String, ovl: usize);
+    fn add_length(&mut self, id: String, ovl: usize) -> bool;
 
     fn get_reads(&self) -> std::collections::HashSet<String>;
 }

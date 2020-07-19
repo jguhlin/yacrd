@@ -62,6 +62,17 @@ impl ThreadCommand<Vec<csv::StringRecord>> {
     }
 }
 
+impl ThreadCommand<(String, usize)> {
+    // Consumes the ThreadCommand, which is just fine...
+    pub fn unwrap(self) -> (String, usize) {
+        match self {
+            ThreadCommand::Work(x)   => x,
+            ThreadCommand::Terminate => panic!("Unable to unwrap terminate command"),
+        }
+    }
+}
+
+
 pub struct OnDisk {
     reads2ovl: HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>,
     reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>>,
@@ -174,7 +185,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                 .delimiter(b',')
                 .has_headers(false)
                 .from_reader(std::io::BufReader::with_capacity(
-                    1 * 1024 * 1024, // Files are usually small, so read them completely into memory
+                    4 * 1024 * 1024, // Files are usually small, so read them completely into memory
                     std::fs::File::open(&filename).with_context(|| error::Error::CantReadFile {
                         filename: filename.clone(),
                     })?,
@@ -220,8 +231,14 @@ impl reads2ovl::Reads2Ovl for OnDisk {
         Ok(())
     }
 
-    fn add_length(&mut self, id: String, length: usize) {
-        self.reads2len.entry(id).or_insert(length);
+    // Don't think we actually need this here anymore...
+    fn add_length(&mut self, id: String, length: usize) -> bool { // Return true if insert was against an empty entry, false if it already existed
+        // self.reads2len.entry(id).or_insert(length);
+        // Don't need to check for it, since re-adding will just overwrite the previous one...
+        match self.reads2len.insert(id, length) {
+            None => true,
+            Some(_) => false
+        }
     }
 
     fn get_reads(&self) -> std::collections::HashSet<String> {
@@ -238,14 +255,44 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         let mut children = Vec::new();
 
-        let channel = Arc::new(ArrayQueue::new(1024));
+        let channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(512));
+
+        let reads2len_channel: Arc<ArrayQueue<ThreadCommand<(String, usize)>>> = Arc::new(ArrayQueue::new(8192 * 12)); // Never want to block because of this...
 
         let now = Instant::now();
+
+        let hashmap_child;
+
+        {
+            let reads2len_channel = Arc::clone(&reads2len_channel);
+            hashmap_child = thread::spawn(move || {
+                let mut reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>> = Default::default();
+                reads2len.reserve(512 * 1024 * 1024); // Support 512 million reads before needing to re-allocate
+
+                let backoff = Backoff::new();
+
+                loop {
+                    if let Ok(command) = reads2len_channel.pop() {
+                        if let ThreadCommand::Terminate = command {
+                            return reads2len;
+                        }
+
+                        let entry: (String, usize) = command.unwrap();
+
+                        reads2len.insert(entry.0, entry.1);
+
+                    } else {
+                        backoff.snooze();
+                    }
+                }
+            });
+        }
 
         // JGG: TODO: Hardcoded 48 threads
         let threads = 48;
         for _ in 0..threads {
             let channel = Arc::clone(&channel);
+            let reads2len_channel = Arc::clone(&reads2len_channel);
             // Need to make more of these
             // TODO: Maybe make individual functions or move this out of the
             // threading area?
@@ -257,7 +304,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                         if let ThreadCommand::Terminate = command {
                             // Flush out anything still in memory...
                             r2o.clean_buffer().expect("Unable to clean buffer");
-                            return r2o.reads2len;
+                            return;
                         }
 
                         let records = command.unwrap();
@@ -279,8 +326,21 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             let ovl_a = (util::str2u32(&result[2]).unwrap(), util::str2u32(&result[3]).unwrap());
                             let ovl_b = (util::str2u32(&result[7]).unwrap(), util::str2u32(&result[8]).unwrap());
                 
-                            r2o.add_length(id_a.clone(), len_a);
-                            r2o.add_length(id_b.clone(), len_b);
+                            if r2o.add_length(id_a.clone(), len_a) {
+                                let mut result = reads2len_channel.push(ThreadCommand::Work((id_a.clone(), len_a)));
+                                while let Err(PushError(chunk)) = result {
+                                    println!("Buffer full, waiting...");
+                                    result = reads2len_channel.push(chunk);
+                                }
+                            }
+                            
+                            if r2o.add_length(id_b.clone(), len_b) {
+                                let mut result = reads2len_channel.push(ThreadCommand::Work((id_b.clone(), len_b)));
+                                while let Err(PushError(chunk)) = result {
+                                    println!("Buffer full, waiting...");
+                                    result = reads2len_channel.push(chunk);
+                                }
+                            }
                 
                             r2o.add_overlap(id_a, ovl_a).unwrap();
                             r2o.add_overlap(id_b, ovl_b).unwrap();
@@ -328,23 +388,21 @@ impl reads2ovl::Reads2Ovl for OnDisk {
             }
         }
 
-        println!("Merging children...");
+        println!("Merging children... {} jobs left", channel.len());
         println!("2: {}", now.elapsed().as_secs());
 
         // JGG: Because of the multiple threads, need
         // to bring everything back into the main impl
         // TODO: Make more functional
         for child in children {
-            match child.join() {
-                Ok(mut x) => {
-                    // HashMap<String, usize, BuildHasherDefault<XxHash64>>
-                    for (k, v) in x.drain() {
-                        self.reads2len.insert(k, v);
-                    }
-                },
-                Err(x) => panic!("Error joining worker thread... {:#?}", x)
-            }
+            child.join().expect("Unable to join one of the worker child threads");
         }
+
+        println!("Children joined, now doing hashmap worker");
+
+        self.reads2len = hashmap_child.join().expect("Unable to join hashmap child");
+
+        println!("Hashmap retrieved succesfully");
 
         println!("Returning...");
         println!("2: {}", now.elapsed().as_secs());
