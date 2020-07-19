@@ -239,6 +239,8 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         let channel = Arc::new(ArrayQueue::new(1024));
 
+        let now = Instant::now();
+
         // JGG: TODO: Hardcoded 48 threads
         let threads = 48;
         for _ in 0..threads {
@@ -311,6 +313,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
         }
 
         println!("File read...");
+        println!("2: {}", now.elapsed().as_secs());
 
         backoff.reset();
         for _ in 0..4 { // Very slight delay then issue terminate commands...
@@ -323,6 +326,9 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                 result = channel.push(chunk);
             }
         }
+
+        println!("Merging children...");
+        println!("2: {}", now.elapsed().as_secs());
 
         // JGG: Because of the multiple threads, need
         // to bring everything back into the main impl
@@ -338,6 +344,9 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                 Err(x) => panic!("Error joining worker thread... {:#?}", x)
             }
         }
+
+        println!("Returning...");
+        println!("2: {}", now.elapsed().as_secs());
 
         Ok(())
     }
