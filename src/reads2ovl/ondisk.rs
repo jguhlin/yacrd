@@ -72,7 +72,6 @@ impl ThreadCommand<(String, usize)> {
     }
 }
 
-
 pub struct OnDisk {
     reads2ovl: HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>,
     reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>>,
@@ -257,7 +256,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         let channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(512));
 
-        let reads2len_channel: Arc<ArrayQueue<ThreadCommand<(String, usize)>>> = Arc::new(ArrayQueue::new(8192 * 12)); // Never want to block because of this...
+        let reads2len_channel: Arc<ArrayQueue<ThreadCommand<(String, usize)>>> = Arc::new(ArrayQueue::new(8192 * 1024)); // Never want to block because of this...
 
         let now = Instant::now();
 
@@ -266,6 +265,12 @@ impl reads2ovl::Reads2Ovl for OnDisk {
         {
             let reads2len_channel = Arc::clone(&reads2len_channel);
             hashmap_child = thread::spawn(move || {
+
+                // JGG: TODO: Switch this to be like kmer dict
+                // Use vector for ID's and vector for values
+                // Should have that code somewhere...
+                // This is all far too big for a hashmap...
+
                 let mut reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>> = Default::default();
                 reads2len.reserve(512 * 1024 * 1024); // Support 512 million reads before needing to re-allocate
 
@@ -319,6 +324,8 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                 
                             let id_a = result[0].to_string();
                             let id_b = result[5].to_string();
+
+                            // JGG: TODO: Just get length from the file directly, instead of using hashmap at all to keep track of it...
                 
                             let len_a = util::str2usize(&result[1]).unwrap();
                             let len_b = util::str2usize(&result[6]).unwrap();
@@ -380,6 +387,18 @@ impl reads2ovl::Reads2Ovl for OnDisk {
         for _ in 0..4 { // Very slight delay then issue terminate commands...
             backoff.spin();
         }
+
+        println!("Snoozing until no jobs left... {} currently left", channel.len());
+        while channel.len() > 0 {
+            backoff.snooze();
+        }
+
+        println!("Snoozing until no length jobs left... {} currently left", reads2len_channel.len());
+        while reads2len_channel.len() > 0 {
+            backoff.snooze();
+        }
+
+        println!("issuing terminate to children");
 
         for _ in 0..children.len() {
             let mut result = channel.push(ThreadCommand::Terminate);
