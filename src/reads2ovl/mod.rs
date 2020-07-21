@@ -33,6 +33,22 @@ pub use self::ondisk::*;
 
 /* std use */
 pub use self::fullmemory::*;
+use std::io::BufReader;
+use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
+use std::fs::File;
+use std::thread::Builder;
+use std::thread;
+use std::time::{Instant};
+
+/* external crates */
+use twox_hash::XxHash64;
+use flate2::bufread::GzDecoder;
+use t1ha::{t1ha0};
+
+
+pub const MAX_READS:  usize = 256_000_000;
+
 
 /* local use */
 use crate::error;
@@ -45,6 +61,15 @@ pub trait Reads2Ovl {
 
     fn sub_init(&mut self, filename: &str) -> Result<()> {
         let (input, _) = util::read_file(filename)?;
+
+        
+        let reads2len_worker;
+        {
+            let filename = filename.to_string();
+            reads2len_worker = thread::spawn(move || {
+                get_lengths_from_paf(filename)
+            });
+        }
 
         match util::get_file_type(filename) {
             Some(util::FileType::Paf) => self
@@ -75,6 +100,9 @@ pub trait Reads2Ovl {
             }
         }
 
+        println!("Joining reads2len thread...");
+        let reads2len = reads2len_worker.join().expect("Unable to join reads2len thread");
+
         Ok(())
     }
 
@@ -98,14 +126,8 @@ pub trait Reads2Ovl {
             let id_a = result[0].to_string();
             let id_b = result[1].to_string();
 
-            let len_a = util::str2usize(&result[7])?;
-            let len_b = util::str2usize(&result[11])?;
-
             let ovl_a = (util::str2u32(&result[5])?, util::str2u32(&result[6])?);
             let ovl_b = (util::str2u32(&result[9])?, util::str2u32(&result[10])?);
-
-            self.add_length(id_a.clone(), len_a);
-            self.add_length(id_b.clone(), len_b);
 
             self.add_overlap(id_a, ovl_a)?;
             self.add_overlap(id_b, ovl_b)?;
@@ -119,9 +141,164 @@ pub trait Reads2Ovl {
     fn init_paf(&mut self, input: Box<dyn std::io::Read>) -> Result<()>;
 
     fn add_overlap(&mut self, id: String, ovl: (u32, u32)) -> Result<()>;
-    fn add_length(&mut self, id: String, ovl: usize) -> bool;
 
     fn get_reads(&self) -> std::collections::HashSet<String>;
+}
+
+// Aiming for single threaded here...
+// HashMaps are a bit slow, here we only need to insert an item only once, and never update it
+// So we do it "manually"
+pub struct FastReadsIdx {
+    pub idx:  Vec<Option<core::num::NonZeroU64>>,
+    pub ids:  Vec<Option<String>>,
+    pub lens: Vec<Option<core::num::NonZeroU32>>,
+    pub entries: usize,
+}
+
+impl FastReadsIdx {
+    pub fn convert_to_hashmap(&mut self) -> HashMap<String, u32, BuildHasherDefault<XxHash64>> {
+        let mut reads2len: HashMap<String, u32, BuildHasherDefault<XxHash64>> = Default::default();
+
+        reads2len.reserve(self.entries);
+
+        reads2len = self.idx.iter().filter(|x| x.is_some()).map(|x| {
+            let id = x.unwrap().get() as usize;
+            let readid = self.ids[id].clone().unwrap();
+            let len = self.lens[id].unwrap();
+            (readid, len.get())
+        }).collect();
+
+        reads2len
+
+    }
+
+    pub fn new() -> FastReadsIdx {
+        // Overkill, but multi-threading gives it a slight speed boost
+
+        let idx_builder = match Builder::new()
+                        .name("Idx Builder".into())
+                        .spawn(|| 
+                        {
+                            let mut idx = Vec::with_capacity(MAX_READS);
+                            idx.resize(MAX_READS, None);
+                            idx
+                        })
+                    {
+                        Ok(x)  => x,
+                        Err(y) => panic!("{}", y)
+                    };
+
+        let lens_builder = match Builder::new()
+                        .name("Lens Builder".into())
+                        .spawn(|| 
+                        {
+                            let mut lens = Vec::with_capacity(MAX_READS);
+                            lens.resize(MAX_READS, None);
+                            lens
+                        })
+                    {
+                        Ok(x)  => x,
+                        Err(y) => panic!("{}", y)
+                    };
+
+        let ids_builder = match Builder::new()
+                        .name("Ids Builder".into())
+                        .spawn(|| 
+                        {
+                            let mut ids = Vec::with_capacity(MAX_READS);
+                            ids.resize(MAX_READS, None);
+                            ids
+                        })
+                    {
+                        Ok(x)  => x,
+                        Err(y) => panic!("{}", y)
+                    };
+
+
+        let idx = idx_builder.join().unwrap();
+        let lens = lens_builder.join().unwrap();
+        let ids = ids_builder.join().unwrap(); 
+        let entries = 0;
+
+        FastReadsIdx { idx, lens, ids, entries }
+    }
+
+    // Code stolen from another project of mine, made for multithreaded use, so may be a few artifacts...
+    #[inline]
+    fn get_id(&self, readid: &str) -> usize {
+
+        let hash = t1ha0(readid.as_bytes(), 42_988_123) as usize % MAX_READS;
+
+        let mut id = hash;
+        let mut cur_readid = &self.ids[id];
+        let mut retry: usize = 0;
+
+        while self.idx[id] != None 
+            && 
+            !cur_readid.is_none()
+            &&
+            cur_readid.as_ref().unwrap() != readid
+        {
+            retry = retry.saturating_add(1); // Saturating add is faster
+            id = (hash.wrapping_add(retry)) % MAX_READS;
+            if retry > 100_000 {
+              assert!(self.entries < MAX_READS as usize, "More entries than MAX_READS!");
+              println!("Error: More than 100,000 tries...");
+            }
+            cur_readid = &self.ids[id];
+        }
+
+        id as usize
+    }
+
+    #[inline]
+    fn add_len(&mut self, readid: &str, len: &str) {
+        // We pass len as &str because we don't want to do a conversion unless absolutely necessary...
+
+        let id = self.get_id(readid);
+        if let None = self.ids[id] {
+            self.idx[id] = core::num::NonZeroU64::new(self.entries as u64);
+            self.ids[self.entries] = Some(readid.to_string());
+            self.lens[self.entries] = core::num::NonZeroU32::new(len.parse::<u32>().unwrap());
+
+            self.entries += 1;
+        }
+    }
+}
+
+pub fn get_lengths_from_paf(filename: String) -> HashMap<String, u32, BuildHasherDefault<XxHash64>> {
+    let now = Instant::now();
+    println!("Starting to get reads2len");
+    println!("R2L {}", now.elapsed().as_secs());
+
+    let reader = BufReader::with_capacity(
+        64 * 1024 * 1024,
+        File::open(filename).expect("Unable to open file"));
+
+    let reader = BufReader::with_capacity(32 * 1024 * 1024, GzDecoder::new(reader));
+
+    let mut readsidx = FastReadsIdx::new();
+
+    let mut reader = csv::ReaderBuilder::new()
+            .delimiter(b'\t')
+            .flexible(true)
+            .has_headers(false)
+            .from_reader(reader);
+
+    for record in reader.records() {
+        let result = record.expect("Unable to read from CSV file");
+
+        readsidx.add_len(&result[0], &result[1]);
+        readsidx.add_len(&result[5], &result[6]);
+    }
+
+    println!("Finished reads2len, converting to hashmap");
+    println!("R2L {}", now.elapsed().as_secs());
+
+    let result = readsidx.convert_to_hashmap();
+    println!("Finished reads2len hashmap conversion");
+    println!("R2L {}", now.elapsed().as_secs());
+    result
 }
 
 #[cfg(test)]

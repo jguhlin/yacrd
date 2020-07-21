@@ -25,7 +25,7 @@ use std::io::Write;
 /* crate use */
 use log::info;
 use fs3::FileExt;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use crossbeam::utils::Backoff;
 
 /* local use */
@@ -42,7 +42,7 @@ use std::collections::HashMap;
 use crossbeam::queue::{ArrayQueue, PushError};
 use std::thread;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Instant};
 
 use thincollections::thin_vec::ThinVec;
 
@@ -230,21 +230,10 @@ impl reads2ovl::Reads2Ovl for OnDisk {
         Ok(())
     }
 
-    // Don't think we actually need this here anymore...
-    fn add_length(&mut self, id: String, length: usize) -> bool { // Return true if insert was against an empty entry, false if it already existed
-        // self.reads2len.entry(id).or_insert(length);
-        // Don't need to check for it, since re-adding will just overwrite the previous one...
-        match self.reads2len.insert(id, length) {
-            None => true,
-            Some(_) => false
-        }
-    }
-
     fn get_reads(&self) -> std::collections::HashSet<String> {
         self.reads2len.keys().map(|x| x.to_string()).collect()
     }
 
-    // JGG: TODO: Refactor to be more functional
     fn init_paf(&mut self, input: Box<dyn std::io::Read>) -> Result<()> {
         let mut reader = csv::ReaderBuilder::new()
             .delimiter(b'\t')
@@ -256,48 +245,12 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         let channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(512));
 
-        let reads2len_channel: Arc<ArrayQueue<ThreadCommand<(String, usize)>>> = Arc::new(ArrayQueue::new(8192 * 1024)); // Never want to block because of this...
-
         let now = Instant::now();
-
-        let hashmap_child;
-
-        {
-            let reads2len_channel = Arc::clone(&reads2len_channel);
-            hashmap_child = thread::spawn(move || {
-
-                // JGG: TODO: Switch this to be like kmer dict
-                // Use vector for ID's and vector for values
-                // Should have that code somewhere...
-                // This is all far too big for a hashmap...
-
-                let mut reads2len: HashMap<String, usize, BuildHasherDefault<XxHash64>> = Default::default();
-                reads2len.reserve(512 * 1024 * 1024); // Support 512 million reads before needing to re-allocate
-
-                let backoff = Backoff::new();
-
-                loop {
-                    if let Ok(command) = reads2len_channel.pop() {
-                        if let ThreadCommand::Terminate = command {
-                            return reads2len;
-                        }
-
-                        let entry: (String, usize) = command.unwrap();
-
-                        reads2len.insert(entry.0, entry.1);
-
-                    } else {
-                        backoff.snooze();
-                    }
-                }
-            });
-        }
 
         // JGG: TODO: Hardcoded 48 threads
         let threads = 48;
         for _ in 0..threads {
             let channel = Arc::clone(&channel);
-            let reads2len_channel = Arc::clone(&reads2len_channel);
             // Need to make more of these
             // TODO: Maybe make individual functions or move this out of the
             // threading area?
@@ -328,27 +281,8 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             // JGG: TODO: Just get length from the file directly, instead of using hashmap at all to keep track of it...
                             // Probably use sled as high performance backend...
                 
-                            let len_a = util::str2usize(&result[1]).unwrap();
-                            let len_b = util::str2usize(&result[6]).unwrap();
-                
                             let ovl_a = (util::str2u32(&result[2]).unwrap(), util::str2u32(&result[3]).unwrap());
                             let ovl_b = (util::str2u32(&result[7]).unwrap(), util::str2u32(&result[8]).unwrap());
-                
-                            if r2o.add_length(id_a.clone(), len_a) {
-                                let mut result = reads2len_channel.push(ThreadCommand::Work((id_a.clone(), len_a)));
-                                while let Err(PushError(chunk)) = result {
-                                    println!("Length Buffer full, waiting...");
-                                    result = reads2len_channel.push(chunk);
-                                }
-                            }
-                            
-                            if r2o.add_length(id_b.clone(), len_b) {
-                                let mut result = reads2len_channel.push(ThreadCommand::Work((id_b.clone(), len_b)));
-                                while let Err(PushError(chunk)) = result {
-                                    println!("Length Buffer full, waiting...");
-                                    result = reads2len_channel.push(chunk);
-                                }
-                            }
                 
                             r2o.add_overlap(id_a, ovl_a).unwrap();
                             r2o.add_overlap(id_b, ovl_b).unwrap();
@@ -394,11 +328,6 @@ impl reads2ovl::Reads2Ovl for OnDisk {
             backoff.snooze();
         }
 
-        println!("Snoozing until no length jobs left... {} currently left", reads2len_channel.len());
-        while reads2len_channel.len() > 0 {
-            backoff.snooze();
-        }
-
         println!("issuing terminate to children");
 
         for _ in 0..children.len() {
@@ -417,12 +346,6 @@ impl reads2ovl::Reads2Ovl for OnDisk {
         for child in children {
             child.join().expect("Unable to join one of the worker child threads");
         }
-
-        println!("Children joined, now doing hashmap worker");
-
-        self.reads2len = hashmap_child.join().expect("Unable to join hashmap child");
-
-        println!("Hashmap retrieved succesfully");
 
         println!("Returning...");
         println!("2: {}", now.elapsed().as_secs());

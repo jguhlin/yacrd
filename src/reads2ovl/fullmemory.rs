@@ -21,7 +21,7 @@
 */
 
 /* crate use */
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 
 /* local use */
 use crate::reads2ovl;
@@ -90,25 +90,14 @@ impl reads2ovl::Reads2Ovl for FullMemory {
             let id_a = result[0].to_string();
             let id_b = result[5].to_string();
 
-            let len_a = util::str2usize(&result[1])?;
-            let len_b = util::str2usize(&result[6])?;
-
             let ovl_a = (util::str2u32(&result[2])?, util::str2u32(&result[3])?);
             let ovl_b = (util::str2u32(&result[7])?, util::str2u32(&result[8])?);
-
-            self.add_length(id_a.clone(), len_a);
-            self.add_length(id_b.clone(), len_b);
 
             self.add_overlap(id_a, ovl_a)?;
             self.add_overlap(id_b, ovl_b)?;
         }
 
         Ok(())
-    }
-
-    fn add_length(&mut self, id: String, length: usize) -> bool {
-        self.reads2ovl.entry(id).or_insert((Vec::new(), 0)).1 = length;
-        false // Doesn't matter for full memory...
     }
 
     fn get_reads(&self) -> std::collections::HashSet<String> {

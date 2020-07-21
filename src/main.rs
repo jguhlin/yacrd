@@ -38,7 +38,7 @@ extern crate snap;
 extern crate fs3;
 extern crate crossbeam;
 
-use std::time::{Duration, Instant};
+use std::time::{Instant};
 
 /* mod declaration*/
 mod cli;

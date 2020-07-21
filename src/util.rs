@@ -57,7 +57,7 @@ pub fn get_file_type(filename: &str) -> Option<FileType> {
 // JGG: TODO: All buffer sizes should be variables for CLI
 pub fn read_file(filename: &str) -> Result<(Box<dyn std::io::Read>, niffler::compression::Format)> {
     let raw_in = Box::new(std::io::BufReader::with_capacity(
-        256 * 1024 * 1024, // 256 Mb buffer, probably too large but helps with network I/O...
+        128 * 1024 * 1024, // 128 Mb buffer, probably too large but helps with network I/O...
         std::fs::File::open(filename).with_context(|| error::Error::CantReadFile {
             filename: filename.to_string(),
         })?,
