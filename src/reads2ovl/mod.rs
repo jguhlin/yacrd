@@ -110,7 +110,7 @@ pub trait Reads2Ovl {
         {
             let filename = filename.to_string();
             reads2len_worker = thread::spawn(move || {
-                parse_paf("output".to_string(), 64, 8 * 1024, filename)
+                parse_paf("output".to_string(), 64, 8 * 1024 * 1024, filename)
             });
         }
 
