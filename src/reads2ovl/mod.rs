@@ -48,7 +48,6 @@ use flate2::bufread::GzDecoder;
 use t1ha::{t1ha0};
 use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
 use sled;
-use thincollections::thin_vec::ThinVec;
 use crossbeam::utils::Backoff;
 use crossbeam::queue::{ArrayQueue, PushError};
 use byteorder::{BigEndian};
@@ -82,9 +81,9 @@ impl ThreadCommand<Vec<csv::StringRecord>> {
     }
 }
 
-impl ThreadCommand<HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>> {
+impl ThreadCommand<HashMap<String, Vec<(u32, u32)>, BuildHasherDefault<XxHash64>>> {
     // Consumes the ThreadCommand, which is just fine...
-    pub fn unwrap(self) -> HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>> {
+    pub fn unwrap(self) -> HashMap<String, Vec<(u32, u32)>, BuildHasherDefault<XxHash64>> {
         match self {
             ThreadCommand::Work(x)   => x,
             ThreadCommand::Terminate => panic!("Unable to unwrap terminate command"),
@@ -110,7 +109,7 @@ pub trait Reads2Ovl {
         {
             let filename = filename.to_string();
             reads2len_worker = thread::spawn(move || {
-                parse_paf("output".to_string(), 64, 8 * 1024 * 1024, filename)
+                parse_paf("output".to_string(), 12, 256 * 1024, filename)
             });
         }
 
@@ -326,7 +325,7 @@ pub fn parse_paf(prefix: String,
     pb.set_style(ProgressStyle::default_bar()
         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"));
 
-    let output_channel:  Arc<ArrayQueue<ThreadCommand<HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>>>> = Arc::new(ArrayQueue::new(threads * 2));
+    let output_channel:  Arc<ArrayQueue<ThreadCommand<HashMap<String, Vec<(u32, u32)>, BuildHasherDefault<XxHash64>>>>> = Arc::new(ArrayQueue::new(threads * 2));
     let process_channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(threads * 2));
 
     let mut workers = Vec::with_capacity(threads);
@@ -340,7 +339,7 @@ pub fn parse_paf(prefix: String,
         let worker = thread::spawn(move || {
             let backoff = Backoff::new();
             let mut overlaps: HashMap<String, 
-                                ThinVec<(u32, u32)>, 
+                                Vec<(u32, u32)>, 
                                 BuildHasherDefault<XxHash64>> = Default::default();
 
             overlaps.reserve(batch_size);
@@ -370,7 +369,7 @@ pub fn parse_paf(prefix: String,
 
                         // JGG: TODO: Make into function...
                         let x = match overlaps.get_mut(&id_a) {
-                            None => { overlaps.insert(id_a.clone(), ThinVec::new());
+                            None => { overlaps.insert(id_a.clone(), Vec::with_capacity(2 * 1024));
                                       overlaps.get_mut(&id_a).unwrap()
                                     },
                             Some(x) => x
@@ -379,7 +378,7 @@ pub fn parse_paf(prefix: String,
                         x.push(ovl_a);
 
                         let x = match overlaps.get_mut(&id_b) {
-                            None => { overlaps.insert(id_b.clone(), ThinVec::new());
+                            None => { overlaps.insert(id_b.clone(), Vec::with_capacity(2 * 1024));
                                       overlaps.get_mut(&id_b).unwrap()
                                     },
                             Some(x) => x
@@ -389,7 +388,7 @@ pub fn parse_paf(prefix: String,
 
                         count += 1;
                 }
-                    if count >= batch_size {
+                    if overlaps.len() >= 128 * 1024 {
                         let mut result = output_channel.push(ThreadCommand::Work(overlaps));
                         while let Err(PushError(overlaps)) = result {
                             std::thread::park();
@@ -402,6 +401,24 @@ pub fn parse_paf(prefix: String,
                         count = 0;
                     }
                 } else {
+
+		    // If parking, go ahead and send off...
+/*                    if overlaps.len() > 8192 { // Gotta be at least a little bit worth it...
+  		       let mut result = output_channel.push(ThreadCommand::Work(overlaps));
+                       while let Err(PushError(overlaps)) = result {
+                           std::thread::park();
+                           backoff.snooze();
+                           result = output_channel.push(overlaps);
+                       }
+                    }
+                    main_thread.unpark();
+                    overlaps = Default::default();
+                    overlaps.reserve(batch_size);
+                    count = 0; */
+			// No, not worth it...
+
+
+
                     main_thread.unpark();
                     std::thread::park();
                     backoff.snooze();
@@ -420,7 +437,13 @@ pub fn parse_paf(prefix: String,
             let db = sled::Config::default()
                             .path(prefix.to_string())
                             .create_new(true)
+			    .mode(sled::Mode::HighThroughput)
+			    .cache_capacity(2 * 1024 * 1024 * 1024)
                             .open().expect("Unable to open (or create) database!");
+
+            let mut overlaps: HashMap<String,
+                                Vec<(u32, u32)>,
+                                BuildHasherDefault<XxHash64>> = Default::default();
 
             loop {
                 if let Ok(command) = output_channel.pop() {
@@ -433,6 +456,8 @@ pub fn parse_paf(prefix: String,
 
                     let mut output = command.unwrap();
                     let mut batch = Batch::default();
+		    println!();
+		    println!("\n\n {} \n\n", output.len());
 
                     for (k, vs) in output.drain() {
                         let new_val: Vec<(u32, u32)> = match db.get(k.as_bytes()).expect("Unable to read from database") {
@@ -448,7 +473,7 @@ pub fn parse_paf(prefix: String,
                     }
 
                     db.apply_batch(batch).expect("Error applying batch update");
-                    db.flush().expect("Unable to flush database");
+                    // db.flush().expect("Unable to flush database");
                 } else {
                     std::thread::park();
                     backoff.snooze();
@@ -478,11 +503,21 @@ pub fn parse_paf(prefix: String,
 
     let backoff = Backoff::new();
 
+    let mut last_in_a = "".to_string();
+    let mut last_in_b = "".to_string();
+
     for record in reader.records() {
         let result = record.expect("Unable to read from CSV file");
 
-        readsidx.add_len(&result[0], &result[1]);
-        readsidx.add_len(&result[5], &result[6]);
+	if last_in_a != &result[0] {
+	        readsidx.add_len(&result[0], &result[1]);
+		last_in_a = result[0].to_string();
+	}
+
+	if last_in_b != &result[5] {
+	        readsidx.add_len(&result[5], &result[6]);
+		last_in_b = result[5].to_string();
+	}
 
         chunk.push(result);
         if chunk.len() == chunk_size {
@@ -557,7 +592,7 @@ pub fn parse_paf(prefix: String,
         pb.tick();
         pb.reset_eta();
         pb.reset_elapsed();
-        println!("{} currently in queue", output_channel.len());
+        // println!("{} currently in queue", output_channel.len());
         output_worker.thread().unpark();
     }
 
