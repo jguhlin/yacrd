@@ -326,8 +326,8 @@ pub fn parse_paf(prefix: String,
     pb.set_style(ProgressStyle::default_bar()
         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"));
 
-    let output_channel:  Arc<ArrayQueue<ThreadCommand<HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>>>> = Arc::new(ArrayQueue::new(64));
-    let process_channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(4096));
+    let output_channel:  Arc<ArrayQueue<ThreadCommand<HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>>>> = Arc::new(ArrayQueue::new(threads * 2));
+    let process_channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(threads * 2));
 
     let mut workers = Vec::with_capacity(threads);
 
@@ -425,6 +425,7 @@ pub fn parse_paf(prefix: String,
             loop {
                 if let Ok(command) = output_channel.pop() {
                     if let ThreadCommand::Terminate = command {
+                        db.flush().expect("Unable to perform final db flush");
                         return db
                     }
 
@@ -462,7 +463,7 @@ pub fn parse_paf(prefix: String,
     println!("R2L {}", now.elapsed().as_secs());
 
     let reader = BufReader::with_capacity(
-        64 * 1024 * 1024,
+        32 * 1024 * 1024,
         pb.wrap_read(file));
 
     let reader = BufReader::with_capacity(32 * 1024 * 1024, GzDecoder::new(reader));
@@ -475,7 +476,7 @@ pub fn parse_paf(prefix: String,
             .has_headers(false)
             .from_reader(reader);
 
-    let chunk_size = 64 * 1024;
+    let chunk_size = batch_size;
     let mut chunk = Vec::with_capacity(chunk_size);
 
     let backoff = Backoff::new();
