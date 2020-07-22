@@ -37,6 +37,10 @@ use clap::Clap;
 extern crate snap;
 extern crate fs3;
 extern crate crossbeam;
+extern crate sled;
+extern crate zerocopy;
+extern crate byteorder;
+extern crate bincode;
 
 use std::time::{Instant};
 

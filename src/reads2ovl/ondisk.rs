@@ -98,14 +98,7 @@ impl OnDisk {
     }
 
     // JGG: TODO: Enable snappy compression for temp files...
-    fn clean_buffer(&mut self, 
-        output_channel: &Arc<ArrayQueue<ThreadCommand<Vec<(String, Vec<(u32, u32)>)>>>>) 
-            -> Result<()> {
-        info!(
-            "Clear cache, number of value in cache is {}",
-            self.number_of_value
-        );
-
+    fn clean_buffer(&mut self) -> Result<()> {
         for (key, values) in self.reads2ovl.iter_mut() {
 
             if values.len() > 0 {
@@ -275,7 +268,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             // Flush out anything still in memory...
                             println!("Got terminate command! Cleaning... {}", x);
                             if r2o.number_of_value > 0 {
-                                r2o.clean_buffer(&output_channel).expect("Unable to clean buffer");
+                                r2o.clean_buffer().expect("Unable to clean buffer");
                             }
                             println!("Returning {}", x);
                             return
@@ -304,7 +297,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             r2o.add_overlap(id_b, ovl_b).unwrap();
 
                             if r2o.number_of_value >= r2o.buffer_size {
-                                r2o.clean_buffer(&output_channel).expect("Unable to clean buffer");
+                                r2o.clean_buffer().expect("Unable to clean buffer");
                             }
                     
                         }
@@ -312,7 +305,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                         // Nothing to do, go ahead and clean buffer...
                         backoff.snooze();
                         if r2o.number_of_value > 5000 {
-                            r2o.clean_buffer(&output_channel).expect("Unable to clean buffer");
+                            r2o.clean_buffer().expect("Unable to clean buffer");
                         }
                     }
                 }

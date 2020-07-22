@@ -40,15 +40,57 @@ use std::fs::File;
 use std::thread::Builder;
 use std::thread;
 use std::time::{Instant};
+use std::sync::Arc;
 
 /* external crates */
 use twox_hash::XxHash64;
 use flate2::bufread::GzDecoder;
 use t1ha::{t1ha0};
 use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
+use sled;
+use thincollections::thin_vec::ThinVec;
+use crossbeam::utils::Backoff;
+use crossbeam::queue::{ArrayQueue, PushError};
+use byteorder::{BigEndian};
+use serde::{Serialize, Deserialize};
+use bincode;
+use sled::{Batch, open};
 
+use zerocopy::{byteorder::U64, 
+    AsBytes, 
+    FromBytes, 
+    LayoutVerified, 
+    Unaligned, 
+    U16, 
+    U32,};
 
 pub const MAX_READS:  usize = 256_000_000;
+
+#[derive(PartialEq)]
+pub enum ThreadCommand<T> {
+    Work(T),
+    Terminate,
+}
+
+impl ThreadCommand<Vec<csv::StringRecord>> {
+    // Consumes the ThreadCommand, which is just fine...
+    pub fn unwrap(self) -> Vec<csv::StringRecord> {
+        match self {
+            ThreadCommand::Work(x)   => x,
+            ThreadCommand::Terminate => panic!("Unable to unwrap terminate command"),
+        }
+    }
+}
+
+impl ThreadCommand<HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>> {
+    // Consumes the ThreadCommand, which is just fine...
+    pub fn unwrap(self) -> HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>> {
+        match self {
+            ThreadCommand::Work(x)   => x,
+            ThreadCommand::Terminate => panic!("Unable to unwrap terminate command"),
+        }
+    }
+}
 
 
 /* local use */
@@ -68,9 +110,11 @@ pub trait Reads2Ovl {
         {
             let filename = filename.to_string();
             reads2len_worker = thread::spawn(move || {
-                get_lengths_from_paf(filename)
+                parse_paf("output".to_string(), 48, 96_000, filename)
             });
         }
+
+        /*
 
         match util::get_file_type(filename) {
             Some(util::FileType::Paf) => self
@@ -102,6 +146,9 @@ pub trait Reads2Ovl {
         }
 
         println!("Joining reads2len thread...");
+
+        */
+
         let reads2len = reads2len_worker.join().expect("Unable to join reads2len thread");
 
         Ok(())
@@ -268,7 +315,138 @@ impl FastReadsIdx {
 }
 
 // JGG: TODO: Make compressed paf optional
-pub fn get_lengths_from_paf(filename: String) -> HashMap<String, u32, BuildHasherDefault<XxHash64>> {
+pub fn parse_paf(prefix: String, 
+                 threads: usize,
+                 batch_size: usize,
+                 filename: String) 
+    -> HashMap<String, u32, BuildHasherDefault<XxHash64>> {
+
+    let output_channel:  Arc<ArrayQueue<ThreadCommand<HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>>>> = Arc::new(ArrayQueue::new(64));
+    let process_channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(4096));
+
+    let mut workers = Vec::with_capacity(threads);
+
+    for i in 0..threads {
+        let process_channel = Arc::clone(&process_channel);
+        let output_channel = Arc::clone(&output_channel);
+        // let x = i.clone();
+        
+        let worker = thread::spawn(move || {
+            let backoff = Backoff::new();
+            let mut overlaps: HashMap<String, 
+                                ThinVec<(u32, u32)>, 
+                                BuildHasherDefault<XxHash64>> = Default::default();
+
+            overlaps.reserve(batch_size);
+            let mut count: usize = 0;
+
+            loop {
+                if let Ok(command) = process_channel.pop() {
+                    if let ThreadCommand::Terminate = command {
+                        // Do cleanup
+                        if count > 0 {
+                            let mut result = output_channel.push(ThreadCommand::Work(overlaps));
+                            while let Err(PushError(overlaps)) = result {
+                                println!("Output Buffer full, waiting...");
+                                backoff.snooze();
+                                result = output_channel.push(overlaps);
+                            }
+                        }
+                        return
+                    }
+                    let records = command.unwrap();
+
+                    for result in records {
+                        let id_a = result[0].to_string();
+                        let id_b = result[5].to_string();
+
+                        let ovl_a = (util::str2u32(&result[2]).unwrap(), util::str2u32(&result[3]).unwrap());
+                        let ovl_b = (util::str2u32(&result[7]).unwrap(), util::str2u32(&result[8]).unwrap());
+
+                        // JGG: TODO: Make into function...
+                        let x = match overlaps.get_mut(&id_a) {
+                            None => { overlaps.insert(id_a.clone(), ThinVec::new());
+                                      overlaps.get_mut(&id_a).unwrap()
+                                    },
+                            Some(x) => x
+                        };
+
+                        x.push(ovl_a);
+
+                        let x = match overlaps.get_mut(&id_b) {
+                            None => { overlaps.insert(id_b.clone(), ThinVec::new());
+                                      overlaps.get_mut(&id_b).unwrap()
+                                    },
+                            Some(x) => x
+                        };
+
+                        x.push(ovl_b);
+
+                        count += 2;
+                }
+
+                    if count >= batch_size {
+                        let mut result = output_channel.push(ThreadCommand::Work(overlaps));
+                        while let Err(PushError(overlaps)) = result {
+                            println!("Output Buffer full, waiting...");
+                            backoff.snooze();
+                            result = output_channel.push(overlaps);
+                        }
+                        overlaps = Default::default();
+                        overlaps.reserve(batch_size);
+                    }
+                } else {
+                    // Nothing to do, go ahead and clean buffer...
+                    backoff.snooze();
+                }
+            }});
+        workers.push(worker);
+    }
+
+    let output_worker;
+
+    {
+
+        let output_channel = Arc::clone(&output_channel);
+        output_worker = thread::spawn(move || {
+            let backoff = Backoff::new();
+            let db = sled::Config::default()
+                            .path(prefix.to_string())
+                            .flush_every_ms(Some(2_000))
+                            .create_new(true)
+                            .open().expect("Unable to open (or create) database!");
+
+            loop {
+                if let Ok(command) = output_channel.pop() {
+                    if let ThreadCommand::Terminate = command {
+                        return db
+                    }
+
+                    let mut output = command.unwrap();
+                    let mut batch = Batch::default();
+
+                    for (k, vs) in output.drain() {
+                        let new_val: Vec<(u32, u32)> = match db.get(k.as_bytes()).expect("Unable to read from database") {
+                            Some(x) => {
+                                let mut orig: Vec<(u32, u32)> = bincode::deserialize(&x).expect("Unable to deserialize vector");
+                                orig.extend(vs);
+                                orig
+                            },
+                            None    => vs.to_vec(),
+                        };
+
+                        batch.insert(k.as_bytes(), bincode::serialize(&new_val).expect("Unable to serialize vector"));
+                    }
+
+                    db.apply_batch(batch).expect("Error applying batch update");
+                } else {
+                    backoff.snooze();
+                }
+            }
+
+        });
+    }
+
     let now = Instant::now();
     println!("Starting to get reads2len");
     println!("R2L {}", now.elapsed().as_secs());
@@ -287,11 +465,66 @@ pub fn get_lengths_from_paf(filename: String) -> HashMap<String, u32, BuildHashe
             .has_headers(false)
             .from_reader(reader);
 
+    let chunk_size = 8 * 1024;
+    let mut chunk = Vec::with_capacity(chunk_size);
+
+    let backoff = Backoff::new();
+
     for record in reader.records() {
         let result = record.expect("Unable to read from CSV file");
 
         readsidx.add_len(&result[0], &result[1]);
         readsidx.add_len(&result[5], &result[6]);
+
+        chunk.push(result);
+        if chunk.len() == chunk_size {
+            let mut result = process_channel.push(ThreadCommand::Work(chunk));
+            while let Err(PushError(chunk)) = result {
+                println!("Chunks Buffer full, waiting...");
+                backoff.snooze();
+                result = process_channel.push(chunk);
+            }
+            chunk = Vec::with_capacity(chunk_size);
+        }
+    }
+
+    if chunk.len() > 0 {
+        let mut result = process_channel.push(ThreadCommand::Work(chunk));
+        while let Err(PushError(chunk)) = result {
+            println!("Chunks Buffer full, waiting...");
+            backoff.snooze();
+            result = process_channel.push(chunk);
+        }
+    }
+
+    for _ in 0..16 { // Very slight delay then issue terminate commands...
+        backoff.spin();
+    }
+
+    println!("Snoozing until no jobs left... {} currently left", process_channel.len());
+    while process_channel.len() > 0 {
+        backoff.snooze();
+    }
+
+    println!("Process channel empty, snoozing until output channel empty");
+    while output_channel.len() > 0 {
+        backoff.snooze();
+    }
+
+    for _ in 0..workers.len() {
+        let mut result = process_channel.push(ThreadCommand::Terminate);
+        while let Err(PushError(x)) = result {
+            result = process_channel.push(x);
+        }
+    }
+
+    let mut result = output_channel.push(ThreadCommand::Terminate);
+    while let Err(PushError(x)) = result {
+        result = output_channel.push(x);
+    }
+
+    for worker in workers {
+        worker.join().expect("Unable to join worker");
     }
 
     println!("Finished reads2len, converting to hashmap");
@@ -300,6 +533,8 @@ pub fn get_lengths_from_paf(filename: String) -> HashMap<String, u32, BuildHashe
     let result = readsidx.convert_to_hashmap();
     println!("Finished reads2len hashmap conversion");
     println!("R2L {}", now.elapsed().as_secs());
+
+    let db = output_worker.join().expect("Unable to join output worker and get the db handle...");
     result
 }
 
