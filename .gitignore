@@ -19,3 +19,5 @@ tests/reference.fasta
 # End of https://www.gitignore.io/api/rust
 
 *.log
+*.yovl
+tests/ondisk
