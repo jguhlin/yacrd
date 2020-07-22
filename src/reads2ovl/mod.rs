@@ -387,7 +387,7 @@ pub fn parse_paf(prefix: String,
 
                         x.push(ovl_b);
 
-                        count += 2;
+                        count += 1;
                 }
                     if count >= batch_size {
                         let mut result = output_channel.push(ThreadCommand::Work(overlaps));
@@ -399,6 +399,7 @@ pub fn parse_paf(prefix: String,
                         main_thread.unpark();
                         overlaps = Default::default();
                         overlaps.reserve(batch_size);
+                        count = 0;
                     }
                 } else {
                     main_thread.unpark();
@@ -461,7 +462,7 @@ pub fn parse_paf(prefix: String,
     println!("Starting to get reads2len");
     println!("R2L {}", now.elapsed().as_secs());
 
-    let reader = BufReader::with_capacity(128 * 1024 * 1024, pb.wrap_read(file));
+    let reader = BufReader::with_capacity(64 * 1024 * 1024, pb.wrap_read(file));
     let reader = BufReader::with_capacity(32 * 1024 * 1024, GzDecoder::new(reader));
 
     let mut readsidx = FastReadsIdx::new();
