@@ -110,7 +110,7 @@ pub trait Reads2Ovl {
         {
             let filename = filename.to_string();
             reads2len_worker = thread::spawn(move || {
-                parse_paf("output".to_string(), 64, 256_000, filename)
+                parse_paf("output".to_string(), 64, 1 * 1024 * 1024, filename)
             });
         }
 
@@ -321,6 +321,9 @@ pub fn parse_paf(prefix: String,
                  filename: String) 
     -> HashMap<String, u32, BuildHasherDefault<XxHash64>> {
 
+    let file = File::open(filename).expect("Unable to open file");
+    let pb = ProgressBar::new(file.metadata().expect("Unable to get file metadata").len());
+
     let output_channel:  Arc<ArrayQueue<ThreadCommand<HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>>>> = Arc::new(ArrayQueue::new(64));
     let process_channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(4096));
 
@@ -387,7 +390,6 @@ pub fn parse_paf(prefix: String,
                     if count >= batch_size {
                         let mut result = output_channel.push(ThreadCommand::Work(overlaps));
                         while let Err(PushError(overlaps)) = result {
-                            println!("Output Buffer full, waiting...");
                             backoff.snooze();
                             result = output_channel.push(overlaps);
                         }
@@ -411,7 +413,7 @@ pub fn parse_paf(prefix: String,
             let backoff = Backoff::new();
             let db = sled::Config::default()
                             .path(prefix.to_string())
-                            .flush_every_ms(Some(2_000))
+                            // .flush_every_ms(Some(2_000))
                             .create_new(true)
                             .open().expect("Unable to open (or create) database!");
 
@@ -452,7 +454,7 @@ pub fn parse_paf(prefix: String,
 
     let reader = BufReader::with_capacity(
         64 * 1024 * 1024,
-        File::open(filename).expect("Unable to open file"));
+        pb.wrap_read(file));
 
     let reader = BufReader::with_capacity(32 * 1024 * 1024, GzDecoder::new(reader));
 
