@@ -323,6 +323,9 @@ pub fn parse_paf(prefix: String,
 
     let file = File::open(filename).expect("Unable to open file");
     let pb = ProgressBar::new(file.metadata().expect("Unable to get file metadata").len());
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})"));
+
 
     let output_channel:  Arc<ArrayQueue<ThreadCommand<HashMap<String, ThinVec<(u32, u32)>, BuildHasherDefault<XxHash64>>>>> = Arc::new(ArrayQueue::new(64));
     let process_channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(4096));
