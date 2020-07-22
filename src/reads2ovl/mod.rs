@@ -110,7 +110,7 @@ pub trait Reads2Ovl {
         {
             let filename = filename.to_string();
             reads2len_worker = thread::spawn(move || {
-                parse_paf("output".to_string(), 48, 96_000, filename)
+                parse_paf("output".to_string(), 64, 256_000, filename)
             });
         }
 
@@ -347,7 +347,6 @@ pub fn parse_paf(prefix: String,
                         if count > 0 {
                             let mut result = output_channel.push(ThreadCommand::Work(overlaps));
                             while let Err(PushError(overlaps)) = result {
-                                println!("Output Buffer full, waiting...");
                                 backoff.snooze();
                                 result = output_channel.push(overlaps);
                             }
@@ -480,7 +479,6 @@ pub fn parse_paf(prefix: String,
         if chunk.len() == chunk_size {
             let mut result = process_channel.push(ThreadCommand::Work(chunk));
             while let Err(PushError(chunk)) = result {
-                println!("Chunks Buffer full, waiting...");
                 backoff.snooze();
                 result = process_channel.push(chunk);
             }
@@ -488,10 +486,10 @@ pub fn parse_paf(prefix: String,
         }
     }
 
+    // Process any final pieces...
     if chunk.len() > 0 {
         let mut result = process_channel.push(ThreadCommand::Work(chunk));
         while let Err(PushError(chunk)) = result {
-            println!("Chunks Buffer full, waiting...");
             backoff.snooze();
             result = process_channel.push(chunk);
         }
