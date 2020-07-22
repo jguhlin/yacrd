@@ -389,7 +389,6 @@ pub fn parse_paf(prefix: String,
 
                         count += 2;
                 }
-
                     if count >= batch_size {
                         let mut result = output_channel.push(ThreadCommand::Work(overlaps));
                         while let Err(PushError(overlaps)) = result {
@@ -402,7 +401,8 @@ pub fn parse_paf(prefix: String,
                         overlaps.reserve(batch_size);
                     }
                 } else {
-                    // Nothing to do, go ahead and clean buffer...
+                    main_thread.unpark();
+                    std::thread::park();
                     backoff.snooze();
                 }
             }});
@@ -418,7 +418,6 @@ pub fn parse_paf(prefix: String,
             let backoff = Backoff::new();
             let db = sled::Config::default()
                             .path(prefix.to_string())
-                            // .flush_every_ms(Some(2_000))
                             .create_new(true)
                             .open().expect("Unable to open (or create) database!");
 
@@ -462,10 +461,7 @@ pub fn parse_paf(prefix: String,
     println!("Starting to get reads2len");
     println!("R2L {}", now.elapsed().as_secs());
 
-    let reader = BufReader::with_capacity(
-        32 * 1024 * 1024,
-        pb.wrap_read(file));
-
+    let reader = BufReader::with_capacity(128 * 1024 * 1024, pb.wrap_read(file));
     let reader = BufReader::with_capacity(32 * 1024 * 1024, GzDecoder::new(reader));
 
     let mut readsidx = FastReadsIdx::new();
@@ -515,18 +511,14 @@ pub fn parse_paf(prefix: String,
         }
     }
 
-    for _ in 0..16 { // Very slight delay then issue terminate commands...
-        backoff.spin();
-    }
-
-    println!("Snoozing until no jobs left... {} currently left", process_channel.len());
+    println!("Snoozing until no jobs left... {} currently left, {} in output", process_channel.len(), output_channel.len());
     while process_channel.len() > 0 {
         backoff.snooze();
-    }
+        output_worker.thread().unpark();
 
-    println!("Process channel empty, snoozing until output channel empty");
-    while output_channel.len() > 0 {
-        backoff.snooze();
+        for x in &workers {
+            x.thread().unpark();
+        }
     }
 
     for _ in 0..workers.len() {
@@ -536,13 +528,29 @@ pub fn parse_paf(prefix: String,
         }
     }
 
-    let mut result = output_channel.push(ThreadCommand::Terminate);
-    while let Err(PushError(x)) = result {
-        result = output_channel.push(x);
+    println!("Terminate sent, again snoozing until no jobs left... {} currently left, {} in output", process_channel.len(), output_channel.len());
+    while process_channel.len() > 0 {
+        backoff.snooze();
+        output_worker.thread().unpark();
+
+        for x in &workers {
+            x.thread().unpark();
+        }
     }
 
     for worker in workers {
         worker.join().expect("Unable to join worker");
+    }
+
+    println!("Process channel empty and close. Snoozing until output channel empty. {} currently in queue", output_channel.len());
+    while output_channel.len() > 0 {
+        backoff.snooze();
+        output_worker.thread().unpark();
+    }
+
+    let mut result = output_channel.push(ThreadCommand::Terminate);
+    while let Err(PushError(x)) = result {
+        result = output_channel.push(x);
     }
 
     println!("Finished reads2len, converting to hashmap");
