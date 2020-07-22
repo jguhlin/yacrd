@@ -98,7 +98,9 @@ impl OnDisk {
     }
 
     // JGG: TODO: Enable snappy compression for temp files...
-    fn clean_buffer(&mut self) -> Result<()> {
+    fn clean_buffer(&mut self, 
+        output_channel: &Arc<ArrayQueue<ThreadCommand<Vec<(String, Vec<(u32, u32)>)>>>>) 
+            -> Result<()> {
         info!(
             "Clear cache, number of value in cache is {}",
             self.number_of_value
@@ -180,8 +182,6 @@ impl reads2ovl::Reads2Ovl for OnDisk {
     fn init(&mut self, filename: &str) -> Result<()> {
         self.sub_init(filename)?;
 
-        self.clean_buffer()
-            .with_context(|| anyhow!("Error during creation of tempory file"))?;
         self.number_of_value = 0;
 
         Ok(())
@@ -236,9 +236,6 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         self.number_of_value += 1;
 
-        if self.number_of_value >= self.buffer_size {
-            self.clean_buffer()?;
-        }
         Ok(())
     }
 
@@ -255,7 +252,8 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         let mut children = Vec::new();
 
-        let channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(512));
+        let channel: Arc<ArrayQueue<ThreadCommand<Vec<csv::StringRecord>>>> = Arc::new(ArrayQueue::new(4096));
+        let output_channel: Arc<ArrayQueue<ThreadCommand<Vec<(String, Vec<(u32, u32)>)>>>> = Arc::new(ArrayQueue::new(96));
 
         let now = Instant::now();
 
@@ -263,6 +261,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
         let threads = 48;
         for i in 0..threads {
             let channel = Arc::clone(&channel);
+            let output_channel = Arc::clone(&output_channel);
             // Need to make more of these
             // TODO: Maybe make individual functions or move this out of the
             // threading area?
@@ -276,7 +275,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             // Flush out anything still in memory...
                             println!("Got terminate command! Cleaning... {}", x);
                             if r2o.number_of_value > 0 {
-                                r2o.clean_buffer().expect("Unable to clean buffer");
+                                r2o.clean_buffer(&output_channel).expect("Unable to clean buffer");
                             }
                             println!("Returning {}", x);
                             return
@@ -303,12 +302,17 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                 
                             r2o.add_overlap(id_a, ovl_a).unwrap();
                             r2o.add_overlap(id_b, ovl_b).unwrap();
+
+                            if r2o.number_of_value >= r2o.buffer_size {
+                                r2o.clean_buffer(&output_channel).expect("Unable to clean buffer");
+                            }
+                    
                         }
                     } else {
                         // Nothing to do, go ahead and clean buffer...
                         backoff.snooze();
-                        if r2o.number_of_value > 10000 {
-                            r2o.clean_buffer().expect("Unable to clean buffer");
+                        if r2o.number_of_value > 5000 {
+                            r2o.clean_buffer(&output_channel).expect("Unable to clean buffer");
                         }
                     }
                 }
