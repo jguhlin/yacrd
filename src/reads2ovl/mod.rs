@@ -110,7 +110,7 @@ pub trait Reads2Ovl {
         {
             let filename = filename.to_string();
             reads2len_worker = thread::spawn(move || {
-                parse_paf("output".to_string(), 64, 2 * 1024 * 1024, filename)
+                parse_paf("output".to_string(), 64, 8 * 1024, filename)
             });
         }
 
@@ -542,9 +542,21 @@ pub fn parse_paf(prefix: String,
         worker.join().expect("Unable to join worker");
     }
 
-    println!("Process channel empty and close. Snoozing until output channel empty. {} currently in queue", output_channel.len());
+    pb.finish();
+
+    println!("Worker threads joined...");
+    println!("Process channel empty and closed. Snoozing until output channel empty. {} currently in queue", output_channel.len());
+    let pb = ProgressBar::new(output_channel.len() as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}]"));
+
     while output_channel.len() > 0 {
+        pb.set_position(output_channel.len() as u64);
         backoff.snooze();
+        pb.tick();
+        pb.reset_eta();
+        pb.reset_elapsed();
+        println!("{} currently in queue", output_channel.len());
         output_worker.thread().unpark();
     }
 
