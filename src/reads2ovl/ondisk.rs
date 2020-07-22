@@ -105,21 +105,25 @@ impl OnDisk {
         );
 
         for (key, values) in self.reads2ovl.iter_mut() {
-            let prefix = self.prefix.clone();
-            let mut output = std::io::BufWriter::with_capacity(1 * 1024 * 1024, OnDisk::create_yacrd_ovl_file(&prefix, key));
 
-            for v in values.iter() {
-                writeln!(output, "{},{}", v.0, v.1).with_context(|| {
-                    error::Error::WritingError {
-                        filename: format!("{}{}", &prefix, key),
-                        format: util::FileType::YacrdOverlap,
-                    }
-                })?;
+            if values.len() > 0 {
+                let prefix = self.prefix.clone();
+                let mut file = OnDisk::create_yacrd_ovl_file(&prefix, key);
+                let mut output = std::io::BufWriter::with_capacity(1 * 1024 * 1024, file);
+
+                for v in values.iter() {
+                    writeln!(output, "{},{}", v.0, v.1).with_context(|| {
+                        error::Error::WritingError {
+                            filename: format!("{}{}", &prefix, key),
+                            format: util::FileType::YacrdOverlap,
+                        }
+                    })?;
+                }
+                file = output.into_inner().unwrap();
+                file.unlock().expect("Unable to unlock file");
+    
+                values.clear();
             }
-
-            // JGG: Output will drop here, releasing the file lock
-
-            values.clear();
         }
 
         self.number_of_value = 0;
@@ -151,7 +155,15 @@ impl OnDisk {
 
         // JGG: TODO: Should be a "try" with a timeout
         // But, should also be just fine and safe right now...
-        file.lock_exclusive().expect("Unable to get file lock");
+
+        let backoff = Backoff::new();
+
+        while let Err(_) = file.try_lock_exclusive() {
+            println!("{} still locked...", path.display());
+            backoff.snooze();
+        }
+
+        // file.lock_exclusive().expect("Unable to get file lock")
         file
     }
 }
@@ -249,20 +261,25 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         // JGG: TODO: Hardcoded 48 threads
         let threads = 48;
-        for _ in 0..threads {
+        for i in 0..threads {
             let channel = Arc::clone(&channel);
             // Need to make more of these
             // TODO: Maybe make individual functions or move this out of the
             // threading area?
             let mut r2o = OnDisk::new(self.prefix.clone(), self.buffer_size);
+            let x = i.clone();
             let child = thread::spawn(move || {
                 let backoff = Backoff::new();
                 loop {
                     if let Ok(command) = channel.pop() {
                         if let ThreadCommand::Terminate = command {
                             // Flush out anything still in memory...
-                            r2o.clean_buffer().expect("Unable to clean buffer");
-                            return;
+                            println!("Got terminate command! Cleaning... {}", x);
+                            if r2o.number_of_value > 0 {
+                                r2o.clean_buffer().expect("Unable to clean buffer");
+                            }
+                            println!("Returning {}", x);
+                            return
                         }
 
                         let records = command.unwrap();
@@ -288,7 +305,11 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                             r2o.add_overlap(id_b, ovl_b).unwrap();
                         }
                     } else {
+                        // Nothing to do, go ahead and clean buffer...
                         backoff.snooze();
+                        if r2o.number_of_value > 10000 {
+                            r2o.clean_buffer().expect("Unable to clean buffer");
+                        }
                     }
                 }
             });
@@ -308,7 +329,7 @@ impl reads2ovl::Reads2Ovl for OnDisk {
                 let mut result = channel.push(ThreadCommand::Work(chunk));
                 while let Err(PushError(chunk)) = result {
                     println!("Chunks Buffer full, waiting...");
-                    backoff.spin();
+                    backoff.snooze();
                     result = channel.push(chunk);
                 }
                 chunk = Vec::with_capacity(chunk_size);
@@ -332,6 +353,11 @@ impl reads2ovl::Reads2Ovl for OnDisk {
 
         for _ in 0..children.len() {
             let mut result = channel.push(ThreadCommand::Terminate);
+            backoff.spin();
+            backoff.spin();
+            backoff.spin();
+            backoff.spin();
+            backoff.spin();
             while let Err(PushError(chunk)) = result {
                 result = channel.push(chunk);
             }

@@ -45,6 +45,7 @@ use std::time::{Instant};
 use twox_hash::XxHash64;
 use flate2::bufread::GzDecoder;
 use t1ha::{t1ha0};
+use indicatif::{HumanDuration, MultiProgress, ProgressBar, ProgressStyle};
 
 
 pub const MAX_READS:  usize = 256_000_000;
@@ -266,6 +267,7 @@ impl FastReadsIdx {
     }
 }
 
+// JGG: TODO: Make compressed paf optional
 pub fn get_lengths_from_paf(filename: String) -> HashMap<String, u32, BuildHasherDefault<XxHash64>> {
     let now = Instant::now();
     println!("Starting to get reads2len");
